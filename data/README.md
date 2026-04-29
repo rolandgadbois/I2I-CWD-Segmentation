@@ -1,1 +1,1 @@
-
+Dataset consisting of 63 jpeg images of echocardiograms, originating from DICOM files. All DICOM files converted to jpeg using [dicom2jpg](https://github.com/ykuo2/dicom2jpg), with some minor modification to ensure proper scrubbing of DICOM metadata.
