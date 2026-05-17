@@ -18,13 +18,13 @@ def main():
         help="Output directory"
     )
 
-  parser.add_argument(
+    parser.add_argument(
         "--recursive",
         default=True,
         help="Whether to search subdirectories"
     )
 
-  parser.add_argument(
+    parser.add_argument(
         "--verbose",
         default=False,
         help="Whether to print output messages"
