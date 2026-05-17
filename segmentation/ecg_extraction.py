@@ -34,7 +34,7 @@ def main():
 
     process_dicom_directory(
         dicom_dir=args.input,
-        output_dir=args.output.
+        output_dir=args.output,
         recursive=args.recursive,
         verbose=args.verbose
     )
