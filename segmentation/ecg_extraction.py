@@ -13,12 +13,6 @@ def main():
     )
 
     parser.add_argument(
-        "--output",
-        default=None,
-        help="Output directory"
-    )
-
-    parser.add_argument(
         "--recursive",
         default=store_true,
         help="Whether to search subdirectories"
@@ -34,7 +28,6 @@ def main():
 
     process_dicom_directory(
         dicom_dir=args.input,
-        output_dir=args.output,
         recursive=args.recursive,
         verbose=args.verbose
     )
