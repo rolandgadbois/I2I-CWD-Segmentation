@@ -1,0 +1,461 @@
+import os
+from pathlib import Path
+import traceback
+
+def process_dicom_directory(
+    dicom_dir,
+    output_dir=None,
+    recursive=True,
+    verbose=False
+):
+    """
+    Process all DICOM ECG files in a directory.
+
+    Parameters
+    ----------
+    dicom_dir : str or Path
+        Folder containing DICOM files.
+
+    output_dir : str or Path, optional
+        Root directory for outputs.
+        If None, outputs are stored beside each DICOM.
+
+    recursive : bool
+        Whether to search subdirectories.
+
+    verbose : bool
+        Print progress messages.
+    """
+
+    dicom_dir = Path(dicom_dir)
+
+    if not dicom_dir.exists():
+        raise FileNotFoundError(f"DICOM directory not found: {dicom_dir}")
+
+    pattern = "**/*.dcm" if recursive else "*.dcm"
+    dicom_files = list(dicom_dir.glob(pattern))
+
+    if len(dicom_files) == 0:
+        print("No DICOM files found.")
+        return
+
+    print(f"Found {len(dicom_files)} DICOM files.")
+
+    success_count = 0
+    failure_count = 0
+
+    for dicom_path in dicom_files:
+
+        try:
+            if verbose:
+                print(f"\nProcessing: {dicom_path}")
+
+            process_single_dicom(
+                dicom_file_path=dicom_path,
+                output_dir=output_dir
+            )
+
+            success_count += 1
+
+        except Exception as e:
+
+            failure_count += 1
+
+            print(f"\nFailed: {dicom_path}")
+            print(str(e))
+
+            if verbose:
+                traceback.print_exc()
+
+    print("\nProcessing Complete")
+    print(f"Successful: {success_count}")
+    print(f"Failed: {failure_count}")
+
+def process_single_dicom(dicom_file_path, output_dir=None):
+
+    save_ecg(
+        dicom_file_path,
+        output_dir=output_dir
+    )
+
+    find_peaks_ecg_aggregate(
+        dicom_file_path,
+        output_dir=output_dir
+    )
+
+def dicom_cropping(image, dicom_file):
+    if image is not None:
+        max_area = 0
+        largest_region = None
+        
+        for region in dicom_file.SequenceOfUltrasoundRegions:
+            min_y = region.RegionLocationMinY0
+            max_y = region.RegionLocationMaxY1
+            min_x = region.RegionLocationMinX0
+            max_x = region.RegionLocationMaxX1
+            
+            area = (max_x - min_x) * (max_y - min_y)
+            
+            if area > max_area:
+                max_area = area
+                largest_region = region
+
+        return largest_region, image[largest_region.RegionLocationMinY0:image.shape[1], largest_region.RegionLocationMinX0:largest_region.RegionLocationMaxX1]
+    return None,None
+
+def image_dimensions(dicom_file):
+    max_area = 0
+    largest_region = None
+        
+    for region in dicom_file.SequenceOfUltrasoundRegions:
+        min_y = region.RegionLocationMinY0
+        max_y = region.RegionLocationMaxY1
+        min_x = region.RegionLocationMinX0
+        max_x = region.RegionLocationMaxX1
+            
+        area = (max_x - min_x) * (max_y - min_y)
+            
+        if area > max_area:
+            max_area = area
+            largest_region = region
+
+    return largest_region.RegionLocationMinY0, largest_region.RegionLocationMaxY1, largest_region.RegionLocationMinX0, largest_region.RegionLocationMaxX1
+
+def image_scale(dicom_file):
+    max_area = 0
+    largest_region = None
+        
+    for region in dicom_file.SequenceOfUltrasoundRegions:
+        min_y = region.RegionLocationMinY0
+        max_y = region.RegionLocationMaxY1
+        min_x = region.RegionLocationMinX0
+        max_x = region.RegionLocationMaxX1
+            
+        area = (max_x - min_x) * (max_y - min_y)
+            
+        if area > max_area:
+            max_area = area
+            largest_region = region
+
+    return largest_region.PhysicalDeltaX, largest_region.PhysicalDeltaY, largest_region.ReferencePixelY0
+
+def save_ecg(dicom_file_path):
+    _, target_image_path, target_path = file_path(dicom_file_path)
+    image = cv2.imread(target_image_path)
+    dicom_file = pydicom.dcmread(dicom_file_path)
+
+    largest_region, cropped_ecg_image = dicom_cropping(image, dicom_file)
+
+    dimensions = image_dimensions(dicom_file)
+
+    np.savetxt(os.path.join(target_path, "ImageRegion.txt"), dimensions, delimiter=',', fmt='%f')
+
+    scaleX, scaleY, reference = image_scale(dicom_file)
+
+    scale = [scaleX, scaleY, reference]
+
+    np.savetxt(os.path.join(target_path, "ImageScale.txt"), scale, delimiter=',', fmt='%f')
+
+    if cropped_ecg_image is not None:
+        hsv = cv2.cvtColor(cropped_ecg_image, cv2.COLOR_BGR2HSV)
+        
+        lower_saturation = 50
+        upper_saturation = 255
+        
+        lower_value = 180
+        upper_value = 255
+        
+        lower_bound = np.array([0, lower_saturation, lower_value])
+        upper_bound = np.array([180, upper_saturation, upper_value])
+        
+        mask = cv2.inRange(hsv, lower_bound, upper_bound)
+        filtered_image = cv2.bitwise_and(cropped_ecg_image, cropped_ecg_image, mask=mask)
+        
+        pixels = filtered_image.reshape((-1, 3))
+        non_black_pixels = pixels[pixels[:, 2] != 0]
+        
+        mode_result = stats.mode(non_black_pixels)
+
+        if mode_result:
+            mode_hue = mode_result.mode[0]
+            mode_saturation = mode_result.mode[1]
+            mode_value = mode_result.mode[2]
+            
+            delta = 35
+            lower_bound = np.array([mode_hue - delta, mode_saturation - delta, mode_value - delta])
+            upper_bound = np.array([mode_hue + delta, mode_saturation + delta, mode_value + delta])
+            
+            lower_bound = np.clip(lower_bound, [0, 0, 0], [255, 255, 255])
+            upper_bound = np.clip(upper_bound, [0, 0, 0], [255, 255, 255])
+            
+            mask = cv2.inRange(filtered_image, lower_bound, upper_bound)
+            colored_points = cv2.findNonZero(mask)
+            
+            if colored_points is not None:
+                colored_points = colored_points.squeeze()
+    
+                sorted_points = colored_points[np.argsort(colored_points[:, 0])]
+    
+                unique_columns = np.unique(sorted_points[:, 0])
+                
+                final_rows = []
+                final_cols = []
+                
+                for col in unique_columns:
+                    column_points = sorted_points[sorted_points[:, 0] == col]
+                    median_row = np.median(column_points[:, 1])
+                    final_rows.append(median_row)
+                    final_cols.append(col)
+                
+                final_rows = np.array(final_rows)
+                final_cols = np.array(final_cols)
+        
+                spline = CubicSpline(final_cols, final_rows)
+                spline_x = np.linspace(final_cols.min(), final_cols.max(), final_cols.max()-final_cols.min() + 1)
+                spline_y = spline(spline_x)
+                
+                plt.plot(spline_x, spline_y, color='red', linewidth=1)
+                plt.gca().invert_yaxis()
+                plt.grid(True)
+                plt.title('ECG')
+                plt.savefig(os.path.join(target_path, "ECG.png"), bbox_inches='tight')
+                plt.close()
+        
+                np.savetxt(os.path.join(target_path, "ECGxaxis.txt"), spline_x, delimiter=',', fmt='%f')
+                np.savetxt(os.path.join(target_path, "ECGyaxis.txt"), spline_y, delimiter=',', fmt='%f')
+        
+                plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+                plt.plot(spline_x + largest_region.RegionLocationMinX0, spline_y + largest_region.RegionLocationMinY0, color='red', linewidth=1) 
+                plt.axis('off')
+                plt.savefig(os.path.join(target_path, "ECGOverlayed.png"), bbox_inches='tight')
+                plt.close()
+
+def extract_snippet(ecg, peak_idx, fs, window_ms=80):
+    peak_idx = int(peak_idx)
+    half_window = int(fs * window_ms / 1000 / 2)
+    start = max(0, peak_idx - half_window)
+    end = min(len(ecg), peak_idx + half_window)
+    snippet = ecg[start:end]
+    if len(snippet) < 2 * half_window:
+        snippet = np.pad(snippet, (0, 2 * half_window - len(snippet)), mode='constant')
+    return snippet
+
+
+def cluster_qrs_snippets(snippets, similarity_fn, similarity_threshold=0.0275):
+    n = len(snippets)
+
+    if n == 1:
+        return np.array([1])
+        
+    sim_matrix = np.zeros((n, n))
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            sim = similarity_fn(snippets[i], snippets[j])
+            sim_matrix[i, j] = sim
+            sim_matrix[j, i] = sim
+    
+    condensed_sim = squareform(sim_matrix)
+    linkage_matrix = linkage(condensed_sim, method='average')
+    labels = fcluster(linkage_matrix, t= similarity_threshold, criterion='distance')
+
+    return labels
+
+def build_qrs_templates(ecg, consensus_peaks, fs, window_ms=80, similarity_threshold=0.0275):
+    snippets = np.array([extract_snippet(ecg, p, fs, window_ms) for p in consensus_peaks])
+    labels = cluster_qrs_snippets(snippets, waveform_similarity, similarity_threshold=similarity_threshold)
+    templates = [np.mean(snippets[labels == i], axis=0) for i in np.unique(labels)]
+    return templates, labels
+
+def waveform_similarity(template, snippet):
+    distance, paths = dtw.warping_paths(template, snippet)
+    best_path = dtw.best_path(paths)
+    similarity_score = distance / len(best_path)
+
+    return similarity_score
+
+def filter_by_shape_multi(ecg, peaks, templates, fs, window_ms=80, similarity_threshold=0.0275):
+    retained_peaks = []
+    for peak in peaks:
+        snippet = extract_snippet(ecg, peak, fs, window_ms)
+        time_axis = np.linspace(-window_ms / 2, window_ms / 2, len(snippet))
+        plt.plot(time_axis, snippet)
+        plt.grid(True)
+        plt.tight_layout()
+        plt.close()
+        max_similarity = min([waveform_similarity(template, snippet) for template in templates])
+        if max_similarity <= similarity_threshold:
+            retained_peaks.append(peak)
+    return np.array(retained_peaks)
+
+def plot_templates_only(templates, fs, window_ms, target_path):
+    time_axis = np.linspace(-window_ms / 2, window_ms / 2, len(templates[0]))
+    plt.figure(figsize=(8, 5))
+    for i, template in enumerate(templates):
+        plt.plot(time_axis, template, label=f'Template {i}', linewidth=2)
+    plt.xlabel("Time (ms)")
+    plt.ylabel("Amplitude")
+    plt.title("QRS Templates")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(os.path.join(target_path, f'Template{i+1}.png'), bbox_inches='tight')
+    plt.close()
+
+def find_peaks_ecg_aggregate(dicom_file_path):
+    _, target_image_path, target_path = file_path(dicom_file_path)
+    image = cv2.imread(target_image_path)
+
+    if os.path.exists(os.path.join(target_path, "ECGxaxis.txt")) and os.path.exists(os.path.join(target_path, "ECGyaxis.txt")):
+        
+        ECGxAxis = np.loadtxt(os.path.join(target_path, "ECGxaxis.txt"), delimiter=',', dtype=np.float64)
+        ECGyAxis = np.loadtxt(os.path.join(target_path, "ECGyaxis.txt"), delimiter=',', dtype=np.float64)
+    
+        dicom_file = pydicom.dcmread(dicom_file_path)
+    
+        largest_region, _ = dicom_cropping(image, dicom_file)
+    
+        fs = 1 / largest_region.PhysicalDeltaX
+
+        original_ECGyAxis = ECGyAxis
+        ECGyAxis = ECGyAxis - np.median(ECGyAxis)
+        ECGyAxis = ECGyAxis / max(np.max(abs(ECGyAxis)), 1e-10)
+        ECGyAxis = -ECGyAxis
+
+        if np.abs(np.min(ECGyAxis)) > 5*np.abs(np.max(ECGyAxis)):
+            ECGyAxis = -ECGyAxis
+
+        clean_ecg = nk.ecg_clean(ECGyAxis, fs, method = 'neurokit')
+
+        signals, info = nk.ecg_peaks(clean_ecg, fs, method = 'martinez2004', correct_artifacts = True)
+        RPeaksMartinez = info["ECG_R_Peaks"]
+
+        if len(RPeaksMartinez) != 0:
+                plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+                plt.plot(ECGxAxis + largest_region.RegionLocationMinX0, original_ECGyAxis + largest_region.RegionLocationMinY0, color='red', linewidth=1)
+                plt.plot(ECGxAxis[RPeaksMartinez] + largest_region.RegionLocationMinX0, original_ECGyAxis[RPeaksMartinez] + largest_region.RegionLocationMinY0, 'go', markersize=4)
+                plt.axis('off')
+                plt.savefig(os.path.join(target_path, "ECGOverlayedwithPeaksMartinez.png"), bbox_inches='tight')
+                plt.close()
+
+        signals, info = nk.ecg_peaks(clean_ecg, fs, method = 'neurokit', correct_artifacts = True)
+        RPeaksNeurokit = info["ECG_R_Peaks"]
+
+        if len(RPeaksNeurokit) != 0:
+                plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+                plt.plot(ECGxAxis + largest_region.RegionLocationMinX0, original_ECGyAxis + largest_region.RegionLocationMinY0, color='red', linewidth=1)
+                plt.plot(ECGxAxis[RPeaksNeurokit] + largest_region.RegionLocationMinX0, original_ECGyAxis[RPeaksNeurokit] + largest_region.RegionLocationMinY0, 'go', markersize=4)
+                plt.axis('off')
+                plt.savefig(os.path.join(target_path, "ECGOverlayedwithPeaksNeurokit.png"), bbox_inches='tight')
+                plt.close()
+
+        signals, info = nk.ecg_peaks(clean_ecg, fs, method = 'promac', correct_artifacts = True)
+        RPeaksPromac = info["ECG_R_Peaks"]
+
+        if len(RPeaksPromac) != 0:
+                plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+                plt.plot(ECGxAxis + largest_region.RegionLocationMinX0, original_ECGyAxis + largest_region.RegionLocationMinY0, color='red', linewidth=1)
+                plt.plot(ECGxAxis[RPeaksPromac] + largest_region.RegionLocationMinX0, original_ECGyAxis[RPeaksPromac] + largest_region.RegionLocationMinY0, 'go', markersize=4)
+                plt.axis('off')
+                plt.savefig(os.path.join(target_path, "ECGOverlayedwithPeaksPromac.png"), bbox_inches='tight')
+                plt.close()
+
+        signals, info = nk.ecg_peaks(clean_ecg, fs, method = 'rodrigues2021', correct_artifacts = True)
+        RPeaksRodrigues = info["ECG_R_Peaks"]
+
+        if len(RPeaksRodrigues) != 0:
+                plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+                plt.plot(ECGxAxis + largest_region.RegionLocationMinX0, original_ECGyAxis + largest_region.RegionLocationMinY0, color='red', linewidth=1)
+                plt.plot(ECGxAxis[RPeaksRodrigues] + largest_region.RegionLocationMinX0, original_ECGyAxis[RPeaksRodrigues] + largest_region.RegionLocationMinY0, 'go', markersize=4)
+                plt.axis('off')
+                plt.savefig(os.path.join(target_path, "ECGOverlayedwithPeaksRodrigues.png"), bbox_inches='tight')
+                plt.close()
+
+
+        AllRPeaks = []
+        AllRPeaks = np.concatenate([RPeaksMartinez, RPeaksNeurokit, RPeaksPromac, RPeaksRodrigues])
+        Methods = np.concatenate([np.full(len(RPeaksMartinez), 1), np.full(len(RPeaksNeurokit), 2), np.full(len(RPeaksPromac), 3), np.full(len(RPeaksRodrigues), 4)])
+
+        AvailableMethods = set()
+        if len(RPeaksMartinez) > 0: AvailableMethods.add(1)
+        if len(RPeaksNeurokit) > 0: AvailableMethods.add(2)
+        if len(RPeaksPromac) > 0: AvailableMethods.add(3)
+        if len(RPeaksRodrigues) > 0: AvailableMethods.add(4)
+
+        if len(AllRPeaks) != 0:
+            LabeledRPeaks = list(zip(AllRPeaks, Methods))
+            LabeledRPeaks.sort(key=lambda x: x[0])
+            WindowSize = int(fs * 120 / 1000)
+            ClusteredPeaks = []
+            VoteCounts = []
+            ConsensusPeaks = []
+
+            CurrentCluster = [LabeledRPeaks[0]]
+            for i in range(1, len(LabeledRPeaks)):
+                PreviousPeak = CurrentCluster[-1][0]
+                CurrentPeak = LabeledRPeaks[i][0]
+                if CurrentPeak - PreviousPeak <= WindowSize:
+                    CurrentCluster.append(LabeledRPeaks[i])
+                else:
+                    ClusterIndices = [p[0] for p in CurrentCluster]
+                    ClusterMethods = set(p[1] for p in CurrentCluster)
+                    Amplitudes = [ECGyAxis[idx] for idx in ClusterIndices]
+                    RepresentativePeak = ClusterIndices[np.argmax(Amplitudes)]
+                    ClusteredPeaks.append(RepresentativePeak)
+                    if ClusterMethods == AvailableMethods:
+                        ConsensusPeaks.append(RepresentativePeak)
+                    CurrentCluster = [LabeledRPeaks[i]]
+
+            if CurrentCluster:
+                ClusterIndices = [p[0] for p in CurrentCluster]
+                ClusterMethods = set(p[1] for p in CurrentCluster)
+                Amplitudes = [ECGyAxis[idx] for idx in ClusterIndices]
+                RepresentativePeak = ClusterIndices[np.argmax(Amplitudes)]
+                ClusteredPeaks.append(RepresentativePeak)
+                if ClusterMethods == AvailableMethods:
+                        ConsensusPeaks.append(RepresentativePeak)
+
+            print(ConsensusPeaks)
+            if len(ConsensusPeaks) == 0:
+                Templates, labels = build_qrs_templates(ECGyAxis, ClusteredPeaks, fs, similarity_threshold=0.0275)
+                plot_templates_only(Templates, fs, window_ms = 80, target_path = target_path)
+            else:
+                Templates, labels = build_qrs_templates(ECGyAxis, ConsensusPeaks, fs, similarity_threshold=0.0275)
+                plot_templates_only(Templates, fs, window_ms = 80, target_path = target_path)
+
+            if Templates is None or np.isnan(Templates).any():
+                FinalPeaks = ClusteredPeaks
+            else:
+                FinalPeaks = filter_by_shape_multi(ECGyAxis, ClusteredPeaks, Templates, fs, similarity_threshold=0.0275)
+
+
+            if len(FinalPeaks) != 0:
+                q_wave_offsets = []
+                q_window = int(0.05 * fs)
+                
+                for r_idx in FinalPeaks:
+                    search_start = max(0, r_idx - q_window)
+                    q_segment = ECGyAxis[search_start:r_idx]
+                
+                    if len(q_segment) > 0:
+                        q_wave_offset = np.argmin(q_segment)
+                        q_wave_idx = search_start + q_wave_offset
+                        q_wave_offsets.append(q_wave_idx)
+                
+                q_wave_offsets = np.array(q_wave_offsets)
+        
+                np.savetxt(os.path.join(target_path, "ECGPeaks.txt"), ECGxAxis[FinalPeaks], delimiter=',', fmt='%f')
+    
+                np.savetxt(os.path.join(target_path, "ECGQWaves.txt"), ECGxAxis[q_wave_offsets], delimiter=',', fmt='%f')
+    
+                heartRate = (60*fs)/np.average(np.diff(FinalPeaks))
+                print(heartRate)
+                HeartRate = [heartRate]
+                np.savetxt(os.path.join(target_path, "HeartRate.txt"), HeartRate, delimiter = ',', fmt='%f')
+        
+                plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+                plt.plot(ECGxAxis + largest_region.RegionLocationMinX0, original_ECGyAxis + largest_region.RegionLocationMinY0, color='red', linewidth=1)
+                plt.plot(ECGxAxis[FinalPeaks] + largest_region.RegionLocationMinX0, original_ECGyAxis[FinalPeaks] + largest_region.RegionLocationMinY0, 'go', markersize=4)
+                plt.plot(ECGxAxis[q_wave_offsets] + largest_region.RegionLocationMinX0, original_ECGyAxis[q_wave_offsets] + largest_region.RegionLocationMinY0, 'bo', markersize=4)
+                plt.axis('off')
+                plt.savefig(os.path.join(target_path, "ECGOverlayedwithPeaks.png"), bbox_inches='tight')
+                plt.close()
