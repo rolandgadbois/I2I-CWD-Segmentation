@@ -20,13 +20,13 @@ def main():
 
     parser.add_argument(
         "--recursive",
-        default=True,
+        default=store_true,
         help="Whether to search subdirectories"
     )
 
     parser.add_argument(
         "--verbose",
-        default=False,
+        default=store_true,
         help="Whether to print output messages"
     )
 
