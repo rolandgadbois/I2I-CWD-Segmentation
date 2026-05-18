@@ -16,7 +16,6 @@ from scipy.spatial.distance import squareform
 
 def process_dicom_directory(
     dicom_dir,
-    output_dir=None,
     recursive=True,
     verbose=False
 ):
@@ -27,10 +26,6 @@ def process_dicom_directory(
     ----------
     dicom_dir : str or Path
         Folder containing DICOM files.
-
-    output_dir : str or Path, optional
-        Root directory for outputs.
-        If None, outputs are stored beside each DICOM.
 
     recursive : bool
         Whether to search subdirectories.
@@ -63,8 +58,7 @@ def process_dicom_directory(
                 print(f"\nProcessing: {dicom_path}")
 
             process_single_dicom(
-                dicom_file_path=dicom_path,
-                output_dir=output_dir
+                dicom_file_path=dicom_path
             )
 
             success_count += 1
@@ -83,16 +77,14 @@ def process_dicom_directory(
     print(f"Successful: {success_count}")
     print(f"Failed: {failure_count}")
 
-def process_single_dicom(dicom_file_path, output_dir=None):
+def process_single_dicom(dicom_file_path):
 
     save_ecg(
-        dicom_file_path,
-        output_dir=output_dir
+        dicom_file_path
     )
 
     find_peaks_ecg_aggregate(
-        dicom_file_path,
-        output_dir=output_dir
+        dicom_file_path
     )
 
 def dicom_cropping(image, dicom_file):
